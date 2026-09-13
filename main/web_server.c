@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "sensor_manager.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -13,7 +14,6 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-#include "esp_camera.h"
 
 #define NVS_NAMESPACE       "wifi_config"
 #define NVS_KEY_SSID        "wifi_ssid"
@@ -51,20 +51,47 @@ static void url_decode(char *dst, const char *src, size_t dst_len)
 }
 
 /* -------------------------------------------------------------------------
- * Station Mode Handlers (Live Feed & Camera Capture)
+ * Station Mode Handlers (Live Dashboard & Cached PSRAM Snapshot)
  * ------------------------------------------------------------------------- */
 static esp_err_t sta_root_get_handler(httpd_req_t *req)
 {
-    const char *html = 
+    float temp = 0.0f, hum = 0.0f;
+    char temp_str[16] = "--";
+    char hum_str[16] = "--";
+
+    if (sensor_manager_get_sht40(&temp, &hum)) {
+        snprintf(temp_str, sizeof(temp_str), "%.1f &deg;C", temp);
+        snprintf(hum_str, sizeof(hum_str), "%.1f %%", hum);
+    }
+
+    char html[1536];
+    snprintf(html, sizeof(html),
         "<!DOCTYPE html><html>"
-        "<head><meta charset=\"UTF-8\"><title>Coop Hub Live</title>"
-        "<style>body{font-family:Arial,sans-serif;text-align:center;background:#1a1a1a;color:#fff;margin:0;padding:20px;}"
-        ".img-box{margin:20px auto;max-width:800px;border-radius:8px;overflow:hidden;box-shadow:0 4px 10px rgba(0,0,0,0.5);}"
-        "img{width:100%;height:auto;display:block;}</style></head>"
-        "<body><h1>Hello from the Coop!</h1><p>Live feed updating every 5s</p>"
-        "<div class=\"img-box\"><img id=\"cam\" src=\"/image.jpg\" alt=\"Coop View\"></div>"
-        "<script>setInterval(()=>{document.getElementById('cam').src='/image.jpg?t='+new Date().getTime();},5000);</script>"
-        "</body></html>";
+        "<head><meta charset=\"UTF-8\"><title>Smart Chicken Coop Hub</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;text-align:center;background:#1e1e1e;color:#f0f0f0;margin:0;padding:20px;}"
+        ".metrics{display:flex;justify-content:center;gap:20px;margin:20px auto;max-width:500px;}"
+        ".card{background:#2a2a2a;padding:15px 25px;border-radius:10px;box-shadow:0 4px 6px rgba(0,0,0,0.3);flex:1;}"
+        ".val{font-size:24px;font-weight:bold;color:#4caf50;margin-top:5px;}"
+        ".img-box{margin:20px auto;max-width:800px;border-radius:10px;overflow:hidden;box-shadow:0 4px 10px rgba(0,0,0,0.6);background:#000;}"
+        "img{width:100%%;height:auto;display:block;}"
+        "</style></head>"
+        "<body>"
+        "<h1>Coop Environmental Hub</h1>"
+        "<div class=\"metrics\">"
+        "  <div class=\"card\"><div>Temperature</div><div class=\"val\">%s</div></div>"
+        "  <div class=\"card\"><div>Humidity</div><div class=\"val\">%s</div></div>"
+        "</div>"
+        "<h3>Latest Motion Capture</h3>"
+        "<div class=\"img-box\"><img id=\"cam\" src=\"/image.jpg\" alt=\"Awaiting motion detection...\"></div>"
+        "<script>"
+        "  setInterval(() => {"
+        "    document.getElementById('cam').src = '/image.jpg?t=' + new Date().getTime();"
+        "  }, 5000);"
+        "</script>"
+        "</body></html>",
+        temp_str, hum_str
+    );
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
@@ -73,21 +100,25 @@ static esp_err_t sta_root_get_handler(httpd_req_t *req)
 
 static esp_err_t sta_image_get_handler(httpd_req_t *req)
 {
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-        ESP_LOGE(TAG, "Camera capture failed");
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
+    const uint8_t *jpeg_buf = NULL;
+    size_t jpeg_len = 0;
+
+    esp_err_t err = sensor_manager_lock_snapshot(&jpeg_buf, &jpeg_len);
+    if (err != ESP_OK || jpeg_buf == NULL) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_send(req, "No motion snapshot captured yet", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
     }
 
     httpd_resp_set_type(req, "image/jpeg");
-    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=motion.jpg");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     httpd_resp_set_hdr(req, "Pragma", "no-cache");
 
-    esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
-    esp_camera_fb_return(fb);
+    esp_err_t res = httpd_resp_send(req, (const char *)jpeg_buf, jpeg_len);
+
+    sensor_manager_unlock_snapshot();
     return res;
 }
 

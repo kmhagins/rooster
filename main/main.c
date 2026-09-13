@@ -12,6 +12,7 @@
 
 #include "camera_interface.h"
 #include "wifi_manager.h"
+#include "sensor_manager.h"
 
 #define NVS_NAMESPACE       "wifi_config"
 #define NVS_KEY_SSID        "wifi_ssid"
@@ -54,10 +55,13 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing Camera...");
     initialize_camera();
 
-    // 3. Initialize Power Management (Dynamic frequency scaling + Light Sleep)
+    // 3. Initialize SHT40, PIR interrupt, and background tasks
+    ESP_ERROR_CHECK(sensor_manager_init());
+
+    // 4. Initialize Power Management (Dynamic frequency scaling + Light Sleep)
     init_power_management();
 
-    // 4. Check for stored Wi-Fi credentials
+    // 5. Check for stored Wi-Fi credentials
     nvs_handle_t nvs_h;
     char stored_ssid[33] = {0};
     char stored_pass[65] = {0};
@@ -74,7 +78,7 @@ void app_main(void)
         nvs_close(nvs_h);
     }
 
-    // 5. Branch execution to Station Mode or SoftAP Provisioning Mode
+    // 6. Branch execution to Station Mode or SoftAP Provisioning Mode
     if (has_creds) {
         ESP_LOGI(TAG, "Found stored credentials for SSID: %s. Connecting...", stored_ssid);
         start_station_mode(stored_ssid, stored_pass);
